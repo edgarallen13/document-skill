@@ -14,73 +14,48 @@ A .docx file is a ZIP archive containing XML files.
 
 | Task | Approach |
 |------|----------|
-| Read/analyze content | Use `docx-js` for text extraction |
+| Read/analyze content | `pandoc` or unpack for raw XML |
 | Create new document | Use `docx-js` - see Creating New Documents below |
-| Edit existing document | Use `docx-js` for programmatic editing |
+| Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
 
 ### Converting .doc to .docx
 
-Legacy `.doc` files can be converted using LibreOffice's command-line tool:
+Legacy `.doc` files must be converted before editing:
 
 ```bash
-soffice --headless --convert-to docx document.doc
+python scripts/office/soffice.py --headless --convert-to docx document.doc
 ```
 
 ### Reading Content
 
-```javascript
-const { Document } = require('docx');
-const fs = require('fs');
+```bash
+# Text extraction with tracked changes
+pandoc --track-changes=all document.docx -o output.md
 
-// Read and parse docx content
-const docBuffer = fs.readFileSync('document.docx');
-const parser = new Document(docBuffer);
-const content = parser.getText();
+# Raw XML access
+python scripts/office/unpack.py document.docx unpacked/
 ```
 
 ### Converting to Images
 
-```javascript
-const { Document } = require('docx');
-const fs = require('fs');
-const puppeteer = require('puppeteer');
-
-// Convert docx to PDF using Puppeteer
-async function convertToImages(docxPath) {
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
-  await page.pdf({ path: 'document.pdf', format: 'A4' });
-  await browser.close();
-  
-  // Convert PDF to images using pdf2image or similar
-  // This would require additional Node.js packages
-}
+```bash
+python scripts/office/soffice.py --headless --convert-to pdf document.docx
+pdftoppm -jpeg -r 150 document.pdf page
 ```
 
 ### Accepting Tracked Changes
 
-```javascript
-const { Document } = require('docx');
-const fs = require('fs');
+To produce a clean document with all tracked changes accepted (requires LibreOffice):
 
-// Process and accept tracked changes programmatically
-async function acceptChanges(inputPath, outputPath) {
-  const docBuffer = fs.readFileSync(inputPath);
-  const document = new Document(docBuffer);
-  
-  // Process tracked changes
-  const processedDocument = document.acceptTrackedChanges();
-  
-  // Save the cleaned document
-  await processedDocument.save(outputPath);
-}
+```bash
+python scripts/accept_changes.py input.docx output.docx
 ```
 
 ---
 
 ## Creating New Documents
 
-Generate .docx files with pure JavaScript/Node.js. Install: `npm install docx`
+Generate .docx files with JavaScript, then validate. Install: `npm install -g docx`
 
 ### Setup
 ```javascript
@@ -91,24 +66,15 @@ const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageR
         TabStopType, TabStopPosition, Column, SectionType,
         TableOfContents, HeadingLevel, BorderStyle, WidthType, ShadingType,
         VerticalAlign, PageNumber, PageBreak } = require('docx');
-const fs = require('fs');
 
 const doc = new Document({ sections: [{ children: [/* content */] }] });
-Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("doc.docx", buffer);
-});
+Packer.toBuffer(doc).then(buffer => fs.writeFileSync("doc.docx", buffer));
 ```
 
 ### Validation
-After creating the file, validate it using JavaScript-based validation:
-```javascript
-const { validateDocument } = require('./docx-validator');
-
-validateDocument('doc.docx').then(isValid => {
-  if (!isValid) {
-    console.log('Document validation failed, please check the XML structure');
-  }
-});
+After creating the file, validate it. If validation fails, unpack, fix the XML, and repack.
+```bash
+python scripts/office/validate.py doc.docx
 ```
 
 ### Page Size
@@ -433,22 +399,19 @@ sections: [{
 
 **Follow all 3 steps in order.**
 
-### Step 1: Parse
-```javascript
-const { Document } = require('docx');
-const fs = require('fs');
-
-// Parse existing document
-const docBuffer = fs.readFileSync('document.docx');
-const document = new Document(docBuffer);
+### Step 1: Unpack
+```bash
+python scripts/office/unpack.py document.docx unpacked/
 ```
-Parses XML, normalizes formatting, and prepares for programmatic editing.
+Extracts XML, pretty-prints, merges adjacent runs, and converts smart quotes to XML entities (`&#x201C;` etc.) so they survive editing. Use `--merge-runs false` to skip run merging.
 
-### Step 2: Edit
+### Step 2: Edit XML
 
-Edit the document programmatically using JavaScript. See XML Reference below for patterns.
+Edit files in `unpacked/word/`. See XML Reference below for patterns.
 
 **Use "Claude" as the author** for tracked changes and comments, unless the user explicitly requests use of a different name.
+
+**Use the Edit tool directly for string replacement. Do not write Python scripts.** Scripts introduce unnecessary complexity. The Edit tool shows exactly what is being replaced.
 
 **CRITICAL: Use smart quotes for new content.** When adding text with apostrophes or quotes, use XML entities to produce smart quotes:
 ```xml
@@ -462,22 +425,19 @@ Edit the document programmatically using JavaScript. See XML Reference below for
 | `&#x201C;` | “ (left double) |
 | `&#x201D;` | ” (right double) |
 
-**Adding comments:** Use JavaScript to add comments programmatically:
-```javascript
-// Add comment to specific paragraph
-const comment = document.addComment({
-  author: "Claude",
-  text: "Comment text with &amp; and &#x2019;",
-  paragraphId: 0
-});
+**Adding comments:** Use `comment.py` to handle boilerplate across multiple XML files (text must be pre-escaped XML):
+```bash
+python scripts/comment.py unpacked/ 0 "Comment text with &amp; and &#x2019;"
+python scripts/comment.py unpacked/ 1 "Reply text" --parent 0  # reply to comment 0
+python scripts/comment.py unpacked/ 0 "Text" --author "Custom Author"  # custom author name
 ```
+Then add markers to document.xml (see Comments in XML Reference).
 
-### Step 3: Save
-```javascript
-// Save the edited document
-await document.save('output.docx');
+### Step 3: Pack
+```bash
+python scripts/office/pack.py unpacked/ output.docx --original document.docx
 ```
-Validates and creates DOCX with proper XML structure.
+Validates with auto-repair, condenses XML, and creates DOCX. Use `--validate false` to skip.
 
 **Auto-repair will fix:**
 - `durableId` >= 0x7FFFFFFF (regenerates valid ID)
@@ -624,10 +584,7 @@ After running `comment.py` (see Step 2), add markers to document.xml. For replie
 
 ## Dependencies
 
-- **docx**: `npm install docx` (new documents and editing)
-- **fs**: Node.js built-in module for file operations
-- **puppeteer**: For PDF conversion and image generation (Node.js package)
-- **xml2js**: For XML parsing and manipulation (Node.js package)
-- **jsdom**: For DOM manipulation and XML processing (Node.js package)
-
-**Note**: All operations are performed using pure JavaScript/Node.js. No Python scripts or external tools are required for core docx generation and editing workflows.
+- **pandoc**: Text extraction
+- **docx**: `npm install -g docx` (new documents)
+- **LibreOffice**: PDF conversion (auto-configured for sandboxed environments via `scripts/office/soffice.py`)
+- **Poppler**: `pdftoppm` for images
